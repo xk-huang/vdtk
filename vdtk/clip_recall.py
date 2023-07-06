@@ -53,7 +53,22 @@ def _get_image_feature_db(data: List[Sample]) -> torch.Tensor:
     return torch.stack(features).to("cpu" if not torch.cuda.is_available() else "cuda")
 
 
-class DummyDataset(torch.utils.data.Dataset):
+def _get_text_features(
+    sample: Sample, text_features: torch.Tensor, char_limit: int = 300
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    model, _, device = clip_model()
+    candidate_text = clip.tokenize([i[:char_limit] for i in sample.candidates]).to(device)
+    reference_text = clip.tokenize([i[:char_limit] for i in sample.references]).to(device)
+    with torch.no_grad():
+        candidate_text_features = model.encode_text(candidate_text)
+        reference_text_features = model.encode_text(reference_text)
+        candidate_text_features /= candidate_text_features.norm(dim=-1, keepdim=True)
+        reference_text_features /= reference_text_features.norm(dim=-1, keepdim=True)
+
+    return candidate_text_features, reference_text_features
+
+
+class ImageDataset(torch.utils.data.Dataset):
     def __init__(self, data, preprocess):
         self.data = data
         self.preprocess = preprocess
@@ -73,7 +88,7 @@ class DummyDataset(torch.utils.data.Dataset):
 def _get_image_feature_db_by_batch(data: List[Sample], batch_size, num_workers) -> torch.Tensor:
     model, preprocess, device = clip_model()
     dataloader = torch.utils.data.DataLoader(
-        DummyDataset(data, preprocess), batch_size=batch_size, num_workers=num_workers
+        ImageDataset(data, preprocess), batch_size=batch_size, num_workers=num_workers
     )
 
     features = []
@@ -87,19 +102,27 @@ def _get_image_feature_db_by_batch(data: List[Sample], batch_size, num_workers) 
     return features
 
 
-def _get_text_features(
-    sample: Sample, text_features: torch.Tensor, char_limit: int = 300
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    model, _, device = clip_model()
-    candidate_text = clip.tokenize([i[:char_limit] for i in sample.candidates]).to(device)
-    reference_text = clip.tokenize([i[:char_limit] for i in sample.references]).to(device)
-    with torch.no_grad():
-        candidate_text_features = model.encode_text(candidate_text)
-        reference_text_features = model.encode_text(reference_text)
-        candidate_text_features /= candidate_text_features.norm(dim=-1, keepdim=True)
-        reference_text_features /= reference_text_features.norm(dim=-1, keepdim=True)
+class TextDataset(torch.utils.data.Dataset):
+    def __init__(self, data, char_limit: int = 300):
+        self.data = data
+        self.char_limit = char_limit
 
-    return candidate_text_features, reference_text_features
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        sample = self.data[idx]
+        candidate_tokens = clip.tokenize([i[: self.char_limit] for i in sample.candidates])
+        reference_toekns = clip.tokenize([i[: self.char_limit] for i in sample.references])
+        candidate_count = len(sample.candidates)
+        reference_count = len(sample.references)
+        return candidate_tokens, reference_toekns, candidate_count, reference_count
+
+    def collate_fn(self, samples):
+        candidate_tokens, reference_toekns, candidate_count, reference_count = zip(*samples)
+        candidate_tokens = torch.cat(candidate_tokens)
+        reference_toekns = torch.cat(reference_toekns)
+        return candidate_tokens, reference_toekns, candidate_count, reference_count
 
 
 def _add_table_row(
@@ -158,12 +181,14 @@ def _add_table_row(
 @click.option("--media-root", default=None, type=str, help="Root directory for media")
 @click.option("--batch-size", default=512, type=int, help="Batch size for featurization")
 @click.option("--num-workers", default=8, type=int, help="Number of processes to use")
+@click.option("--debug", is_flag=True, help="Debug mode")
 def clip_recall(
     dataset_paths: List[str],
     split: Optional[str] = None,
     media_root: Optional[str] = None,
     batch_size: int = 512,
     num_workers: int = 8,
+    debug: bool = False,
 ) -> None:
     # Get the baseline
     baseline_index, dataset_paths = _handle_baseline_index(dataset_paths)
@@ -179,28 +204,46 @@ def clip_recall(
             logging.error(f"Dataset {ds} has no samples")
             continue
 
+        if debug:
+            data = data[:10]
+
         # Compute the features
-        data = data[:100]
         image_feature_db = _get_image_feature_db_by_batch(data, batch_size, num_workers)
+
         # Compute the recall
         candidate_scores = []
         candidate_similarity_scores = []
         reference_similarity_scores = []
         reference_scores = []
-        for index, sample in enumerate(
-            track(data, description=f"Computing recall for dataset {os.path.basename(ds)}", transient=True)
+        text_dataset = TextDataset(data)
+        text_dataloader = torch.utils.data.DataLoader(
+            text_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=text_dataset.collate_fn
+        )
+
+        model, _, device = clip_model()
+        for index, batch in enumerate(
+            track(text_dataloader, description=f"Computing recall for dataset {os.path.basename(ds)}", transient=True)
         ):
-            candidate_features, reference_features = _get_text_features(sample, image_feature_db)
+            condidate_tokens, reference_tokens, candidate_count, reference_count = batch
+            condidate_tokens = condidate_tokens.to(device, non_blocking=True)
+            reference_tokens = reference_tokens.to(device, non_blocking=True)
+            with torch.no_grad():
+                candidate_features = model.encode_text(condidate_tokens)
+                reference_features = model.encode_text(reference_tokens)
+                candidate_features /= candidate_features.norm(dim=-1, keepdim=True)
+                reference_features /= reference_features.norm(dim=-1, keepdim=True)
+
+            # candidate_features, reference_features = _get_text_features(sample, image_feature_db)
             _candidate_similarity_scores = image_feature_db @ candidate_features.T  # num_images x num_candidates
             candidate_ranks = (_candidate_similarity_scores > _candidate_similarity_scores[index]).sum(dim=0)
 
             _reference_similarity_scores = image_feature_db @ reference_features.T
             reference_ranks = (_reference_similarity_scores > _reference_similarity_scores[index]).sum(dim=0)
 
-            candidate_scores.append((candidate_ranks + 1).cpu().numpy())
-            reference_scores.append((reference_ranks + 1).cpu().numpy())
-            candidate_similarity_scores.append(_candidate_similarity_scores[index].max().cpu().numpy())
-            reference_similarity_scores.append(_reference_similarity_scores[index].max().cpu().numpy())
+            candidate_scores.extend([i.cpu().numpy() for i in (candidate_ranks + 1).split(candidate_count, -1)])
+            reference_scores.extend([i.cpu().numpy() for i in (reference_ranks + 1).split(reference_count, -1)])
+            candidate_similarity_scores.extend([i[_idx].max().cpu().numpy() for _idx, i in enumerate(_candidate_similarity_scores.split(candidate_count, -1))])
+            reference_similarity_scores.extend([i[_idx].max().cpu().numpy() for _idx, i in enumerate(_reference_similarity_scores.split(reference_count, -1))])
 
         outputs.append(
             (
