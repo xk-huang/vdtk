@@ -53,6 +53,40 @@ def _get_image_feature_db(data: List[Sample]) -> torch.Tensor:
     return torch.stack(features).to("cpu" if not torch.cuda.is_available() else "cuda")
 
 
+class DummyDataset(torch.utils.data.Dataset):
+    def __init__(self, data, preprocess):
+        self.data = data
+        self.preprocess = preprocess
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        sample = self.data[idx]
+        if sample.media_b64 is not None:
+            media = b64_to_bin(sample.media_b64)
+        elif sample.media_path is not None:
+            media = sample.media_path
+        return self.preprocess(Image.open(media))
+
+
+def _get_image_feature_db_by_batch(data: List[Sample], batch_size, num_workers) -> torch.Tensor:
+    model, preprocess, device = clip_model()
+    dataloader = torch.utils.data.DataLoader(
+        DummyDataset(data, preprocess), batch_size=batch_size, num_workers=num_workers
+    )
+
+    features = []
+    for batch in track(dataloader, description="Featurizing dataset", transient=True):
+        with torch.no_grad():
+            image_features = model.encode_image(batch.to(device))
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        features.append(image_features)
+
+    features = torch.cat(features)
+    return features
+
+
 def _get_text_features(
     sample: Sample, text_features: torch.Tensor, char_limit: int = 300
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -119,12 +153,15 @@ def _add_table_row(
 @click.argument("dataset_paths", type=str, nargs=-1)
 @click.option("--split", default=None, type=str, help="Split to evaluate")
 @click.option("--media-root", default=None, type=str, help="Root directory for media")
+@click.option("--batch-size", default=512, type=int, help="Batch size for featurization")
+@click.option("--num-workers", default=8, type=int, help="Number of processes to use")
 def clip_recall(
     dataset_paths: List[str],
     split: Optional[str] = None,
     media_root: Optional[str] = None,
+    batch_size: int = 512,
+    num_workers: int = 8,
 ) -> None:
-
     # Get the baseline
     baseline_index, dataset_paths = _handle_baseline_index(dataset_paths)
 
@@ -140,8 +177,8 @@ def clip_recall(
             continue
 
         # Compute the features
-        image_feature_db = _get_image_feature_db(data)
-
+        data = data[:100]
+        image_feature_db = _get_image_feature_db_by_batch(data, batch_size, num_workers)
         # Compute the recall
         candidate_scores = []
         reference_scores = []
@@ -149,7 +186,7 @@ def clip_recall(
             track(data, description=f"Computing recall for dataset {os.path.basename(ds)}", transient=True)
         ):
             candidate_features, reference_features = _get_text_features(sample, image_feature_db)
-            candidate_similarity_scores = image_feature_db @ candidate_features.T
+            candidate_similarity_scores = image_feature_db @ candidate_features.T  # num_images x num_candidates
             candidate_ranks = (candidate_similarity_scores > candidate_similarity_scores[index]).sum(dim=0)
 
             reference_similarity_scores = image_feature_db @ reference_features.T
@@ -201,7 +238,7 @@ def clip_recall(
             i,
             baseline_index,
             table,
-            os.path.basename(ds) + " (candidate)",
+            os.path.basename(ds) + f" (candidate) #{len(candidate_scores[0])}",
             candidate_scores,  # type: ignore
             outputs,  # type: ignore
             True,
@@ -210,7 +247,7 @@ def clip_recall(
             i,
             baseline_index,
             table,
-            os.path.basename(ds) + " (reference)",
+            os.path.basename(ds) + f" (reference) #{len(reference_scores[0])}",
             reference_scores,  # type: ignore
             outputs,  # type: ignore
             False,
