@@ -111,7 +111,7 @@ def _add_table_row(
     outputs: Result,
     is_candidate: bool,
 ) -> None:
-    (rank, rrank, recall_1, recall_5, recall_max) = scores
+    (rank, rrank, recall_1, recall_5, recall_max, similarity) = scores
 
     if i is None or baseline_index is None:
         table.add_row(
@@ -121,6 +121,7 @@ def _add_table_row(
             f"{np.mean(recall_1):.4f} ± {np.std(recall_1):.4f}",
             f"{np.mean(recall_5):.4f} ± {np.std(recall_5):.4f}",
             f"{np.amax(recall_max):.4f}",
+            f"{np.mean(similarity):.4f} ± {np.std(similarity):.4f}",
         )
     else:
         if i == baseline_index and not is_candidate:
@@ -131,6 +132,7 @@ def _add_table_row(
                 f"{np.mean(recall_1):.4f} ± {np.std(recall_1):.4f}",
                 f"{np.mean(recall_5):.4f} ± {np.std(recall_5):.4f}",
                 f"{np.amax(recall_max):.4f}",
+                f"{np.mean(similarity):.4f} ± {np.std(similarity):.4f}",
             )
         else:
             table.add_row(
@@ -146,6 +148,7 @@ def _add_table_row(
                     baseline_aggregate=np.amax,
                     positive=False,
                 ),
+                baseline_column(similarity, outputs[baseline_index][1][5], positive=False),  # type: ignores
             )
 
 
@@ -181,19 +184,23 @@ def clip_recall(
         image_feature_db = _get_image_feature_db_by_batch(data, batch_size, num_workers)
         # Compute the recall
         candidate_scores = []
+        candidate_similarity_scores = []
+        reference_similarity_scores = []
         reference_scores = []
         for index, sample in enumerate(
             track(data, description=f"Computing recall for dataset {os.path.basename(ds)}", transient=True)
         ):
             candidate_features, reference_features = _get_text_features(sample, image_feature_db)
-            candidate_similarity_scores = image_feature_db @ candidate_features.T  # num_images x num_candidates
-            candidate_ranks = (candidate_similarity_scores > candidate_similarity_scores[index]).sum(dim=0)
+            _candidate_similarity_scores = image_feature_db @ candidate_features.T  # num_images x num_candidates
+            candidate_ranks = (_candidate_similarity_scores > _candidate_similarity_scores[index]).sum(dim=0)
 
-            reference_similarity_scores = image_feature_db @ reference_features.T
-            reference_ranks = (reference_similarity_scores > reference_similarity_scores[index]).sum(dim=0)
+            _reference_similarity_scores = image_feature_db @ reference_features.T
+            reference_ranks = (_reference_similarity_scores > _reference_similarity_scores[index]).sum(dim=0)
 
             candidate_scores.append((candidate_ranks + 1).cpu().numpy())
             reference_scores.append((reference_ranks + 1).cpu().numpy())
+            candidate_similarity_scores.append(_candidate_similarity_scores[index].max().cpu().numpy())
+            reference_similarity_scores.append(_reference_similarity_scores[index].max().cpu().numpy())
 
         outputs.append(
             (
@@ -208,6 +215,8 @@ def clip_recall(
                     [np.mean(i <= 5) for i in candidate_scores],
                     # 100% recall at
                     [np.amax(i) for i in candidate_scores],  # type: ignore
+                    # Similarity scores
+                    candidate_similarity_scores,
                 ),
                 (
                     # rank
@@ -220,6 +229,8 @@ def clip_recall(
                     [np.mean(i <= 5) for i in reference_scores],
                     # 100% recall at
                     [np.amax(i) for i in reference_scores],
+                    # Similarity scores
+                    reference_similarity_scores,
                 ),
             )
         )
@@ -232,6 +243,7 @@ def clip_recall(
     table.add_column("Recall @ 1", justify="right", style="magenta")
     table.add_column("Recall @ 5", justify="right", style="magenta")
     table.add_column("100% Recall", justify="right", style="magenta")
+    table.add_column("CLIP similarity", justify="right", style="magenta")
     for i, (ds, (candidate_scores, reference_scores)) in enumerate(zip(dataset_paths, outputs)):  # type: ignore
         # Add The candidate scores
         _add_table_row(
