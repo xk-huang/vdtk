@@ -1,5 +1,7 @@
 import logging
+import multiprocessing as mp
 import os
+from itertools import chain
 from typing import List, Optional, Tuple
 
 import click
@@ -77,19 +79,88 @@ def compute_object_rdistance(
     return sum(metric) / (len(metric) + 1e-8)
 
 
+def _noun_recall_job(_nlp: spacy.language.Language, data: List) -> List:
+    return [
+        [
+            compute_object_roverlap(
+                _nlp,
+                c,
+                sample.references,
+                (
+                    "NOUN",
+                    "PROPN",
+                ),
+            )
+            for c in sample.candidates
+        ]
+        for sample in track(data, transient=True, description="Computing content NOUN/PROPN recall...")
+    ]
+
+
+def _verb_recall_job(_nlp: spacy.language.Language, data: List) -> List:
+    return [
+        [
+            compute_object_roverlap(
+                _nlp,
+                c,
+                sample.references,
+                ("VERB",),
+            )
+            for c in sample.candidates
+        ]
+        for sample in track(data, transient=True, description="Computing content VERB recall...")
+    ]
+
+
+def _noun_distance_job(_nlp: spacy.language.Language, data: List) -> List:
+    return [
+        [
+            compute_object_rdistance(
+                _nlp,
+                c,
+                sample.references,
+                (
+                    "NOUN",
+                    "PROPN",
+                ),
+            )
+            for c in sample.candidates
+        ]
+        for sample in track(data, transient=True, description="Computing content fuzzy NOUN/PROPN recall...")
+    ]
+
+
+def _verb_distance_job(_nlp: spacy.language.Language, data: List) -> List:
+    return [
+        [
+            compute_object_rdistance(
+                _nlp,
+                c,
+                sample.references,
+                ("VERB",),
+            )
+            for c in sample.candidates
+        ]
+        for sample in track(data, transient=True, description="Computing content fuzzy VERB recall...")
+    ]
+
+
 @click.command()
 @click.argument("dataset_paths", type=str, nargs=-1)
 @click.option("--split", default=None, type=str, help="Split to evaluate")
+@click.option("--num-workers", default=8, type=int, help="Number of processes to use")
 def content_recall(
     dataset_paths: List[str],
     split: Optional[str] = None,
+    num_workers: int = 8,
 ) -> None:
     # Get the baseline
     baseline_index, dataset_paths = _handle_baseline_index(dataset_paths)
     _nlp = get_or_download_spacy_model("en_core_web_lg")
 
     outputs = []
-    for ds in track(dataset_paths, transient=True, description="Computing content recall..."):
+    # for ds in track(dataset_paths, transient=True, description="Computing content recall..."):
+    for ds in dataset_paths:
         data = load_dataset(ds)
         if split is not None:
             # Filter the data for the correct split
@@ -99,61 +170,29 @@ def content_recall(
             logging.error(f"Dataset {ds} has no samples for split {split}.")
             continue
 
-        noun_recall = [
-            [
-                compute_object_roverlap(
-                    _nlp,
-                    c,
-                    sample.references,
-                    (
-                        "NOUN",
-                        "PROPN",
-                    ),
-                )
-                for c in sample.candidates
-            ]
-            for sample in data
-        ]
-        verb_recall = [
-            [
-                compute_object_roverlap(
-                    _nlp,
-                    c,
-                    sample.references,
-                    ("VERB",),
-                )
-                for c in sample.candidates
-            ]
-            for sample in data
-        ]
-        noun_distance = [
-            [
-                compute_object_rdistance(
-                    _nlp,
-                    c,
-                    sample.references,
-                    (
-                        "NOUN",
-                        "PROPN",
-                    ),
-                )
-                for c in sample.candidates
-            ]
-            for sample in data
-        ]
+        num_samples = len(data)
+        num_samples_per_process = max(1, num_samples // num_workers)
 
-        verb_distance = [
-            [
-                compute_object_rdistance(
-                    _nlp,
-                    c,
-                    sample.references,
-                    ("VERB",),
-                )
-                for c in sample.candidates
-            ]
-            for sample in data
-        ]
+        def get_dataloader():
+            yield from (
+                (_nlp, data[i : i + num_samples_per_process]) for i in range(0, num_samples, num_samples_per_process)
+            )
+
+        with mp.Pool(num_workers) as p:
+            noun_recall = p.starmap(_noun_recall_job, get_dataloader())
+            noun_recall = list(chain.from_iterable(noun_recall))
+
+        with mp.Pool(num_workers) as p:
+            verb_recall = p.starmap(_verb_recall_job, get_dataloader())
+            verb_recall = list(chain.from_iterable(verb_recall))
+
+        with mp.Pool(num_workers) as p:
+            noun_distance = p.starmap(_noun_distance_job, get_dataloader())
+            noun_distance = list(chain.from_iterable(noun_distance))
+
+        with mp.Pool(num_workers) as p:
+            verb_distance = list(p.starmap(_verb_distance_job, get_dataloader()))
+            verb_distance = list(chain.from_iterable(verb_distance))
 
         noun_recall_a = np.array(noun_recall)
         verb_recall_a = np.array(verb_recall)
