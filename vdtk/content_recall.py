@@ -32,7 +32,7 @@ def compute_object_roverlap(
     query_objects = set([token.text for token in query_doc if token.pos_ in POS])
     targets_objects = set([token.text for token in targets_doc if token.pos_ in POS])
     # Return the recall
-    print(query_objects, targets_objects)
+    # print(query_objects, targets_objects)
     return len(set(query_objects).intersection(set(targets_objects))) / (len(set(targets_objects)) + 1e-8)
 
 
@@ -84,7 +84,6 @@ def content_recall(
     dataset_paths: List[str],
     split: Optional[str] = None,
 ) -> None:
-
     # Get the baseline
     baseline_index, dataset_paths = _handle_baseline_index(dataset_paths)
     _nlp = get_or_download_spacy_model("en_core_web_lg")
