@@ -182,6 +182,7 @@ def _add_table_row(
 @click.option("--batch-size", default=512, type=int, help="Batch size for featurization")
 @click.option("--num-workers", default=8, type=int, help="Number of processes to use")
 @click.option("--debug", is_flag=True, help="Debug mode")
+@click.option("--export-scores", is_flag=True, help="Export scores to a csv file")
 def clip_recall(
     dataset_paths: List[str],
     split: Optional[str] = None,
@@ -189,6 +190,7 @@ def clip_recall(
     batch_size: int = 512,
     num_workers: int = 8,
     debug: bool = False,
+    export_scores: bool = False,
 ) -> None:
     # Get the baseline
     baseline_index, dataset_paths = _handle_baseline_index(dataset_paths)
@@ -242,8 +244,18 @@ def clip_recall(
 
             candidate_scores.extend([i.cpu().numpy() for i in (candidate_ranks + 1).split(candidate_count, -1)])
             reference_scores.extend([i.cpu().numpy() for i in (reference_ranks + 1).split(reference_count, -1)])
-            candidate_similarity_scores.extend([i[_idx].max().cpu().numpy() for _idx, i in enumerate(_candidate_similarity_scores.split(candidate_count, -1))])
-            reference_similarity_scores.extend([i[_idx].max().cpu().numpy() for _idx, i in enumerate(_reference_similarity_scores.split(reference_count, -1))])
+            candidate_similarity_scores.extend(
+                [
+                    i[_idx].max().cpu().numpy()
+                    for _idx, i in enumerate(_candidate_similarity_scores.split(candidate_count, -1))
+                ]
+            )
+            reference_similarity_scores.extend(
+                [
+                    i[_idx].max().cpu().numpy()
+                    for _idx, i in enumerate(_reference_similarity_scores.split(reference_count, -1))
+                ]
+            )
 
         outputs.append(
             (
@@ -277,6 +289,31 @@ def clip_recall(
                 ),
             )
         )
+    if export_scores:
+        for dataset_path, output in zip(dataset_paths, outputs):
+            output = np.array(output)
+            output = output.reshape(-1, output.shape[-1])
+            np.savetxt(
+                os.path.join(os.path.dirname(dataset_path), f"{os.path.basename(dataset_path)}_clip_recall.csv"),
+                output.T,
+                delimiter=",",
+                header=",".join(
+                    [
+                        "candidate_rank",
+                        "candidate_rrank",
+                        "candidate_recall_1",
+                        "candidate_recall_5",
+                        "candidate_recall_max",
+                        "candidate_similarity",
+                        "reference_rank",
+                        "reference_rrank",
+                        "reference_recall_1",
+                        "reference_recall_5",
+                        "reference_recall_max",
+                        "reference_similarity",
+                    ]
+                ),
+            )
 
     # Print the results
     table = Table(title=f"CLIP Recall")
