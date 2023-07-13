@@ -116,13 +116,14 @@ class TextDataset(torch.utils.data.Dataset):
         reference_toekns = clip.tokenize([i[: self.char_limit] for i in sample.references])
         candidate_count = len(sample.candidates)
         reference_count = len(sample.references)
-        return candidate_tokens, reference_toekns, candidate_count, reference_count
+        return candidate_tokens, reference_toekns, candidate_count, reference_count, idx
 
     def collate_fn(self, samples):
-        candidate_tokens, reference_toekns, candidate_count, reference_count = zip(*samples)
+        candidate_tokens, reference_toekns, candidate_count, reference_count, batch_idx = zip(*samples)
         candidate_tokens = torch.cat(candidate_tokens)
         reference_toekns = torch.cat(reference_toekns)
-        return candidate_tokens, reference_toekns, candidate_count, reference_count
+        batch_idx = torch.tensor(batch_idx)
+        return candidate_tokens, reference_toekns, candidate_count, reference_count, batch_idx
 
 
 def _add_table_row(
@@ -207,7 +208,7 @@ def clip_recall(
             continue
 
         if debug:
-            data = data[:10]
+            data = data[:1000]
 
         # Compute the features
         image_feature_db = _get_image_feature_db_by_batch(data, batch_size, num_workers)
@@ -223,10 +224,10 @@ def clip_recall(
         )
 
         model, _, device = clip_model()
-        for index, batch in enumerate(
-            track(text_dataloader, description=f"Computing recall for dataset {os.path.basename(ds)}", transient=True)
+        for batch in track(
+            text_dataloader, description=f"Computing recall for dataset {os.path.basename(ds)}", transient=True
         ):
-            condidate_tokens, reference_tokens, candidate_count, reference_count = batch
+            condidate_tokens, reference_tokens, candidate_count, reference_count, batch_idx = batch
             condidate_tokens = condidate_tokens.to(device, non_blocking=True)
             reference_tokens = reference_tokens.to(device, non_blocking=True)
             with torch.no_grad():
@@ -237,25 +238,34 @@ def clip_recall(
 
             # candidate_features, reference_features = _get_text_features(sample, image_feature_db)
             _candidate_similarity_scores = image_feature_db @ candidate_features.T  # num_images x num_candidates
-            candidate_ranks = (_candidate_similarity_scores > _candidate_similarity_scores[index]).sum(dim=0)
+            _candidate_similarity_scores_splits = _candidate_similarity_scores.split(candidate_count, -1)
+            # candidate_ranks = (_candidate_similarity_scores > _candidate_similarity_scores[index]).sum(dim=0)
+            # Bugggy, only suit for batch_size=1
 
             _reference_similarity_scores = image_feature_db @ reference_features.T
-            reference_ranks = (_reference_similarity_scores > _reference_similarity_scores[index]).sum(dim=0)
+            _reference_similarity_scores_splits = _reference_similarity_scores.split(reference_count, -1)
+            # reference_ranks = (_reference_similarity_scores > _reference_similarity_scores[index]).sum(dim=0)
+            # Bugggy, only suit for batch_size=1
 
-            candidate_scores.extend([i.cpu().numpy() for i in (candidate_ranks + 1).split(candidate_count, -1)])
-            reference_scores.extend([i.cpu().numpy() for i in (reference_ranks + 1).split(reference_count, -1)])
-            candidate_similarity_scores.extend(
-                [
-                    i[_idx].max().cpu().numpy()
-                    for _idx, i in enumerate(_candidate_similarity_scores.split(candidate_count, -1))
-                ]
-            )
-            reference_similarity_scores.extend(
-                [
-                    i[_idx].max().cpu().numpy()
-                    for _idx, i in enumerate(_reference_similarity_scores.split(reference_count, -1))
-                ]
-            )
+            # Bugggy, only suit for batch_size=1
+            # candidate_scores.extend([i.cpu().numpy() for i in (candidate_ranks + 1).split(candidate_count, -1)])
+            # reference_scores.extend([i.cpu().numpy() for i in (reference_ranks + 1).split(reference_count, -1)])
+            for col_id, (_candidate_similarity_scores_split, _reference_similarity_scores_split) in enumerate(
+                zip(_candidate_similarity_scores_splits, _reference_similarity_scores_splits)
+            ):
+                row_id = batch_idx[col_id]
+                _candindate_ranks = (
+                    _candidate_similarity_scores_split > _candidate_similarity_scores_split[row_id]
+                ).sum(0)
+                candidate_scores.append(_candindate_ranks.cpu().numpy() + 1)
+                _reference_ranks = (
+                    _reference_similarity_scores_split > _reference_similarity_scores_split[row_id]
+                ).sum(0)
+                reference_scores.append(_reference_ranks.cpu().numpy() + 1)
+
+            for col_id, row_id in enumerate(batch_idx):
+                candidate_similarity_scores.append(_candidate_similarity_scores[row_id, col_id].cpu().numpy())
+                reference_similarity_scores.append(_reference_similarity_scores[row_id, col_id].cpu().numpy())
 
         outputs.append(
             (
@@ -324,10 +334,10 @@ def clip_recall(
     table.add_column("Recall @ 5", justify="right", style="magenta")
     table.add_column("100% Recall", justify="right", style="magenta")
     table.add_column("CLIP similarity", justify="right", style="magenta")
-    for i, (ds, (candidate_scores, reference_scores)) in enumerate(zip(dataset_paths, outputs)):  # type: ignore
+    for col_id, (ds, (candidate_scores, reference_scores)) in enumerate(zip(dataset_paths, outputs)):  # type: ignore
         # Add The candidate scores
         _add_table_row(
-            i,
+            col_id,
             baseline_index,
             table,
             os.path.basename(ds) + f" (candidate) #{len(candidate_scores[0])}",
@@ -336,7 +346,7 @@ def clip_recall(
             True,
         )
         _add_table_row(
-            i,
+            col_id,
             baseline_index,
             table,
             os.path.basename(ds) + f" (reference) #{len(reference_scores[0])}",
