@@ -70,7 +70,7 @@ class PTBTokenizer:
         # save sentences to temporary file
         # ======================================================
         path_to_jar_dirname = os.path.dirname(os.path.abspath(JAR_FILES))
-        tmp_file = tempfile.NamedTemporaryFile(mode="w", delete=False)
+        tmp_file = tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8")
         tmp_file.write(sentences)
         tmp_file.close()
 
