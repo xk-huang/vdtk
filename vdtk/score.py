@@ -339,6 +339,41 @@ def _handle_baseline_index(dataset_paths: Sequence[str]) -> Tuple[Optional[int],
         return 0, [baseline_path] + output_paths
     return None, output_paths
 
+def _plot_distribution(scores: List[float], output_path: str, name: str) -> None:
+    """
+    for i, (path, score) in enumerate(zip(dataset_paths, scores)):
+        output_path = path + f".{label}.{i}.png"
+        _plot_distribution(score[1], output_path, name=label)
+
+    Args:
+        scores (List[float]): _description_
+        output_path (str): _description_
+        name (str): _description_
+    """
+    import matplotlib.pyplot as plt
+
+    sorted_scores = np.sort(scores)
+    y_values_pdf, bin_edges = np.histogram(sorted_scores, bins=100, density=True)
+    bin_width = bin_edges[1] - bin_edges[0]
+    y_values_pdf_count = y_values_pdf * bin_width
+    y_values_cdf = np.arange(len(sorted_scores)) / float(len(sorted_scores))
+    fig, ax1 = plt.subplots()
+    ax1.hist(sorted_scores, bins=100, density=True, alpha=0.5, color="blue")
+    ax1.set_xlabel(name)
+    ax1.set_ylabel("PDF", color="blue")
+    ax1.tick_params(axis="y", labelcolor="blue")
+    ax2 = ax1.twinx()
+    ax2.plot(sorted_scores, y_values_cdf, color="red")
+    ax2.set_ylabel("CDF", color="red")
+    ax2.tick_params(axis="y", labelcolor="red")
+    plt.savefig(output_path)
+    plt.cla()
+    print(f"Saved {output_path}")
+    num_zeros = scores.count(0)
+    total_scores = len(scores)
+    zero_percent = num_zeros / total_scores * 100
+    print(f"Percentage of scores equal to 0: {zero_percent:.2f}% ({total_scores})")
+    print(f"PDF count: {y_values_pdf_count.sum():.2f}")
 
 def _print_table(
     label: str,
@@ -366,6 +401,7 @@ def _print_table(
     # Direct print
     if baseline_index is None:
         for path, score in zip(dataset_paths, scores):
+            _plot_distribution(score[1], path + ".distribution.png", name=label)
             table.add_row(
                 os.path.basename(path),
                 f"{score[0]:0.4f} +/- {np.std(score[1]):0.3f}",
@@ -375,6 +411,7 @@ def _print_table(
     else:
         # Print with a baseline
         for i, (path, score) in enumerate(zip(dataset_paths, scores)):
+            _plot_distribution(score[1], path + ".distribution.png", name=label)
             if i == baseline_index:
                 table.add_row(
                     os.path.basename(path),
