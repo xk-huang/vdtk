@@ -401,7 +401,7 @@ def _print_table(
     # Direct print
     if baseline_index is None:
         for path, score in zip(dataset_paths, scores):
-            _plot_distribution(score[1], path + ".distribution.png", name=label)
+            _plot_distribution(score[1], path + f".{label}-distribution.png", name=label)
             table.add_row(
                 os.path.basename(path),
                 f"{score[0]:0.4f} +/- {np.std(score[1]):0.3f}",
@@ -411,7 +411,7 @@ def _print_table(
     else:
         # Print with a baseline
         for i, (path, score) in enumerate(zip(dataset_paths, scores)):
-            _plot_distribution(score[1], path + ".distribution.png", name=label)
+            _plot_distribution(score[1], path + f".{label}-distribution.png", name=label)
             if i == baseline_index:
                 table.add_row(
                     os.path.basename(path),
