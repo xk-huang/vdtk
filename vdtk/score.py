@@ -228,7 +228,6 @@ def _bleurt(*args, **kwargs):
 
 
 def __bleurt(dataset_paths: Sequence[str], split: Optional[str] = None) -> List[Tuple[float, List[float]]]:
-
     if bleurt_score is None:
         raise ImportError("BLEURT requires the bleurt package to be installed.")
     assert bleurt_score is not None
@@ -339,6 +338,7 @@ def _handle_baseline_index(dataset_paths: Sequence[str]) -> Tuple[Optional[int],
         return 0, [baseline_path] + output_paths
     return None, output_paths
 
+
 def _plot_distribution(scores: List[float], output_path: str, name: str) -> None:
     """
     for i, (path, score) in enumerate(zip(dataset_paths, scores)):
@@ -368,12 +368,19 @@ def _plot_distribution(scores: List[float], output_path: str, name: str) -> None
     ax2.tick_params(axis="y", labelcolor="red")
     plt.savefig(output_path)
     plt.cla()
-    print(f"Saved {output_path}")
+    print(f"Saved plot to: {output_path}")
     num_zeros = scores.count(0)
     total_scores = len(scores)
     zero_percent = num_zeros / total_scores * 100
     print(f"Percentage of scores equal to 0: {zero_percent:.2f}% ({total_scores})")
     print(f"PDF count: {y_values_pdf_count.sum():.2f}")
+
+
+def _save_scores(scores: List[float], output_path: str) -> None:
+    with open(output_path, "w") as f:
+        json.dump(scores, f)
+    print(f"Saved scores to: {output_path}")
+
 
 def _print_table(
     label: str,
@@ -382,8 +389,9 @@ def _print_table(
     baseline_index: Optional[int],
     spice: bool = False,
     swap_colors: bool = False,
+    save_dist_plot: bool = False,
+    save_scores: bool = False,
 ) -> None:
-
     if spice:
         # There are some issues with the Spice score
         spice_raw = [[k["All"]["f"] for k in s[1]] for s in scores]  # type: ignore
@@ -401,17 +409,21 @@ def _print_table(
     # Direct print
     if baseline_index is None:
         for path, score in zip(dataset_paths, scores):
-            _plot_distribution(score[1], path + f".{label}-distribution.png", name=label)
             table.add_row(
                 os.path.basename(path),
                 f"{score[0]:0.4f} +/- {np.std(score[1]):0.3f}",
                 f"{np.max(score[1]):0.4f}",
                 f"{np.min(score[1]):0.4f}",
             )
+
+            if save_dist_plot:
+                _plot_distribution(score[1], path + f".{label}-distribution.png", name=label)
+            if save_scores:
+                scores_path = path + f".{label}-scores.json"
+                _save_scores(score[1], scores_path)
     else:
         # Print with a baseline
         for i, (path, score) in enumerate(zip(dataset_paths, scores)):
-            _plot_distribution(score[1], path + f".{label}-distribution.png", name=label)
             if i == baseline_index:
                 table.add_row(
                     os.path.basename(path),
@@ -433,6 +445,12 @@ def _print_table(
                     f"[{r2_color}]{np.max(score[1]):0.4f} ({'+' if r2_color == good_color else '-'}{np.abs(np.max(score[1]) - np.max(scores[baseline_index][1])) / (np.amax([np.max(score[1]), np.max(scores[baseline_index][1])])+1e-12)*100:0.3f}%)[/{r2_color}]",  # noqa: E501
                     f"[{r3_color}]{np.min(score[1]):0.4f} ({'+' if r3_color == good_color else '-'}{np.abs(np.min(score[1]) - np.min(scores[baseline_index][1])) / (np.amax([np.min(score[1]), np.min(scores[baseline_index][1])])+1e-12)*100:0.3f}%)[/{r3_color}]",  # noqa: E501
                 )
+
+            if save_dist_plot:
+                _plot_distribution(score[1], path + f".{label}-distribution.png", name=label)
+            if save_scores:
+                scores_path = path + f".{label}-scores.json"
+                _save_scores(score[1], scores_path)
     rich.print(table)
 
 
@@ -492,14 +510,30 @@ def _print_bleu_scores(
 def _simple_function_builder(
     metric: Callable[[List[str], Optional[str]], Any], function_name: str, string: str
 ) -> Tuple[Callable[[List[str], Optional[str]], None], click.Command]:
-    def _metric_function(dataset_paths: List[str], split: Optional[str]) -> None:
+    def _metric_function(
+        dataset_paths: List[str], split: Optional[str], save_dist_plot: bool = False, save_scores: bool = False
+    ) -> None:
         baseline_index, dataset_paths = _handle_baseline_index(dataset_paths)
         scores = metric(dataset_paths, split)
-        _print_table(string, scores, dataset_paths, baseline_index, spice=(metric == _spice))
+        _print_table(
+            string,
+            scores,
+            dataset_paths,
+            baseline_index,
+            spice=(metric == _spice),
+            save_dist_plot=save_dist_plot,
+            save_scores=save_scores,
+        )
 
     return _metric_function, click.command(name=function_name)(
         click.argument("dataset_paths", type=str, nargs=-1)(
-            click.option("--split", default=None, type=str, help="Split to evaluate")(_metric_function)
+            click.option("--split", default=None, type=str, help="Split to evaluate")(
+                click.option("--save-dist-plot", default=False, is_flag=True, type=bool, help="Save distribution plot")(
+                    click.option("--save-scores", default=False, is_flag=True, type=bool, help="Save scores")(
+                        _metric_function
+                    )
+                )
+            )
         )
     )
 
@@ -623,7 +657,6 @@ def all(
     num_uk_samples: int = 500,
     mmd_sigma: Optional[float] = None,
 ) -> None:
-
     # Simple Metrics
     baseline_index, dataset_paths_filtered = _handle_baseline_index(dataset_paths)
     all_scores = _pycoco_eval_cap_multi_metric([Cider, Meteor, Rouge, Spice], dataset_paths_filtered, split)
