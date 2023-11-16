@@ -382,6 +382,11 @@ def _save_scores(scores: List[float], output_path: str) -> None:
     print(f"Saved scores to: {output_path}")
 
 
+def _add_prefix_suffix_to_path(path: str, prefix: str, suffix: str) -> str:
+    base_dir, filename = os.path.split(path)
+    return os.path.join(base_dir, prefix + filename + suffix)
+
+
 def _print_table(
     label: str,
     scores: List[Tuple[float, List[float]]],
@@ -417,9 +422,11 @@ def _print_table(
             )
 
             if save_dist_plot:
-                _plot_distribution(score[1], path + f".{label}-distribution.png", name=label)
+                _plot_distribution(
+                    score[1], _add_prefix_suffix_to_path(path, f"{label}-distribution", ".png"), name=label
+                )
             if save_scores:
-                scores_path = path + f".{label}-scores.json"
+                scores_path = _add_prefix_suffix_to_path(path, f"{label}-scores.", ".json")
                 _save_scores(score[1], scores_path)
     else:
         # Print with a baseline
@@ -447,9 +454,11 @@ def _print_table(
                 )
 
             if save_dist_plot:
-                _plot_distribution(score[1], path + f".{label}-distribution.png", name=label)
+                _plot_distribution(
+                    score[1], _add_prefix_suffix_to_path(path, f"{label}-distribution", ".png"), name=label
+                )
             if save_scores:
-                scores_path = path + f".{label}-scores.json"
+                scores_path = _add_prefix_suffix_to_path(path, f"{label}-scores.", ".json")
                 _save_scores(score[1], scores_path)
     rich.print(table)
 
@@ -458,6 +467,8 @@ def _print_bleu_scores(
     baseline_index: Optional[int],
     dataset_paths: List[str],
     scores: List[Tuple[Tuple[float, float, float, float], Tuple[List[float], List[float], List[float], List[float]]]],
+    save_dist_plot: bool = False,
+    save_scores: bool = False,
 ) -> None:
     table = Table(title="BLEU Scores")
     table.add_column("Dataset")
@@ -476,6 +487,18 @@ def _print_bleu_scores(
                 f"{score[0][2]:0.4f} +/- {np.std(score[1][2]):0.3f}",
                 f"{score[0][3]:0.4f} +/- {np.std(score[1][3]):0.3f}",
             )
+
+            if save_dist_plot:
+                for i in range(4):
+                    _plot_distribution(
+                        score[1][i],
+                        _add_prefix_suffix_to_path(path, f"BLEU_{i+1}-distribution.", ".png"),
+                        name=f"BLEU@{i+1}",
+                    )
+            if save_scores:
+                for i in range(4):
+                    scores_path = _add_prefix_suffix_to_path(path, f"BLEU_{i+1}-scores.", ".json")
+                    _save_scores(score[1][i], scores_path)
     else:
         # Print with a baseline
         for i, (path, score) in enumerate(zip(dataset_paths, scores)):
@@ -503,6 +526,18 @@ def _print_bleu_scores(
                     f"[{r3_color}]{score[0][2]:0.4f} +/- {np.std(score[1][2]):0.3f} ({'+' if r3_color == 'green' else '-'}{np.abs(score[0][2] - scores[baseline_index][0][2]) / (np.amax([score[0][2], scores[baseline_index][0][2]])+1e-12) * 100:0.3f}%)[/{r3_color}]",  # noqa: E501
                     f"[{r4_color}]{score[0][3]:0.4f} +/- {np.std(score[1][3]):0.3f} ({'+' if r4_color == 'green' else '-'}{np.abs(score[0][3] - scores[baseline_index][0][3]) / (np.amax([score[0][3], scores[baseline_index][0][3]])+1e-12) * 100:0.3f}%)[/{r4_color}]",  # noqa: E501
                 )
+
+            if save_dist_plot:
+                for i in range(4):
+                    _plot_distribution(
+                        score[1][i],
+                        _add_prefix_suffix_to_path(path, f"BLEU_{i+1}-distribution.", ".png"),
+                        name=f"LEU@{i+1}",
+                    )
+            if save_scores:
+                for i in range(4):
+                    scores_path = _add_prefix_suffix_to_path(path, f"BLEU_{i+1}-scores.", ".json")
+                    _save_scores(score[1][i], scores_path)
 
     rich.print(table)
 
@@ -635,13 +670,15 @@ mmd_glove, mmd_glove_command = _mmd_function_builder(MMDGloveMetricScorer, "mmd-
 @click.command()
 @click.argument("dataset_paths", type=str, nargs=-1)
 @click.option("--split", default=None, type=str, help="Split to evaluate")
-def bleu(dataset_paths: List[str], split: str) -> None:
+@click.option("--save-dist-plot", default=False, is_flag=True, type=bool, help="Save distribution plot")
+@click.option("--save-scores", default=False, is_flag=True, type=bool, help="Save scores")
+def bleu(dataset_paths: List[str], split: str, save_dist_plot: bool = False, save_scores: bool = False) -> None:
     # Handle baseline index
     baseline_index, dataset_paths = _handle_baseline_index(dataset_paths)
     scores = _bleu(dataset_paths, split)
 
     # Rich print scores
-    _print_bleu_scores(baseline_index, dataset_paths, scores)
+    _print_bleu_scores(baseline_index, dataset_paths, scores, save_dist_plot=save_dist_plot, save_scores=save_scores)
 
 
 @click.command()
