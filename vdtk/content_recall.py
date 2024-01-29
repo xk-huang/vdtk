@@ -149,10 +149,16 @@ def _verb_distance_job(_nlp: spacy.language.Language, data: List) -> List:
 @click.argument("dataset_paths", type=str, nargs=-1)
 @click.option("--split", default=None, type=str, help="Split to evaluate")
 @click.option("--num-workers", default=8, type=int, help="Number of processes to use")
+@click.option("--save-dist-plot", default=False, is_flag=True, type=bool, help="Save distribution plot")
+@click.option("--save-scores", default=False, is_flag=True, type=bool, help="Save scores")
+@click.option("--num-samples", default=None, type=int, help="Use less samples")
 def content_recall(
     dataset_paths: List[str],
     split: Optional[str] = None,
     num_workers: int = 8,
+    save_dist_plot: bool = False,
+    save_scores: bool = False,
+    num_samples: Optional[int] = None,
 ) -> None:
     # Get the baseline
     baseline_index, dataset_paths = _handle_baseline_index(dataset_paths)
@@ -162,6 +168,8 @@ def content_recall(
     # for ds in track(dataset_paths, transient=True, description="Computing content recall..."):
     for ds in dataset_paths:
         data = load_dataset(ds)
+        if num_samples is not None:
+            data = data[: num_samples]
         if split is not None:
             # Filter the data for the correct split
             data = [s for s in data if s.split == split]
@@ -246,4 +254,60 @@ def content_recall(
                     baseline_column(nd_mean, np.mean(outputs[baseline_index][2], axis=-1)),
                     baseline_column(vd_mean, np.mean(outputs[baseline_index][3], axis=-1)),
                 )
+        for label, scores in zip(
+            ("noun_recall", "verb_recall", "noun_distance", "verb_distance"),
+            (nr, vr, nd, vd),
+        ):
+            if save_dist_plot:
+                _plot_distribution(scores.flatten(), _add_prefix_suffix_to_path(ds, label + "-", ".png"), name=label)
+            if save_scores:
+                _save_scores(scores.flatten().tolist(), _add_prefix_suffix_to_path(ds, label + "-", ".json"))
     rich.print(table)
+
+def _plot_distribution(scores: List[float], output_path: str, name: str) -> None:
+    """
+    for i, (path, score) in enumerate(zip(dataset_paths, scores)):
+        output_path = path + f".{label}.{i}.png"
+        _plot_distribution(score[1], output_path, name=label)
+
+    Args:
+        scores (List[float]): _description_
+        output_path (str): _description_
+        name (str): _description_
+    """
+    import matplotlib.pyplot as plt
+
+    sorted_scores = np.sort(scores)
+    y_values_pdf, bin_edges = np.histogram(sorted_scores, bins=100, density=True)
+    bin_width = bin_edges[1] - bin_edges[0]
+    y_values_pdf_count = y_values_pdf * bin_width
+    y_values_cdf = np.arange(len(sorted_scores)) / float(len(sorted_scores))
+    fig, ax1 = plt.subplots()
+    ax1.hist(sorted_scores, bins=100, density=True, alpha=0.5, color="blue")
+    ax1.set_xlabel(name)
+    ax1.set_ylabel("PDF", color="blue")
+    ax1.tick_params(axis="y", labelcolor="blue")
+    ax2 = ax1.twinx()
+    ax2.plot(sorted_scores, y_values_cdf, color="red")
+    ax2.set_ylabel("CDF", color="red")
+    ax2.tick_params(axis="y", labelcolor="red")
+    plt.savefig(output_path)
+    plt.cla()
+    print(f"Saved plot to: {output_path}")
+    # num_zeros = scores.count(0)
+    # total_scores = len(scores)
+    # zero_percent = num_zeros / total_scores * 100
+    # print(f"Percentage of scores equal to 0: {zero_percent:.2f}% ({total_scores})")
+    # print(f"PDF count: {y_values_pdf_count.sum():.2f}")
+
+
+def _save_scores(scores: List[float], output_path: str) -> None:
+    import json
+    with open(output_path, "w") as f:
+        json.dump(scores, f)
+    print(f"Saved scores to: {output_path}")
+
+
+def _add_prefix_suffix_to_path(path: str, prefix: str, suffix: str) -> str:
+    base_dir, filename = os.path.split(path)
+    return os.path.join(base_dir, prefix + filename + suffix)
